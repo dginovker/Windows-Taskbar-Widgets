@@ -1,0 +1,24 @@
+name: Build and test
+on: [push, pull_request]
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Build all widgets
+        shell: powershell
+        run: ./build.ps1
+      - name: Regression checks
+        shell: powershell
+        run: ./test.ps1
+  collector-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - run: python ai-usage/test_collector.py
