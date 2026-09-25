@@ -62,9 +62,10 @@ def dig(source, *keys):
     return source
 def load(path):
     try: return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError): return {}
+    except (FileNotFoundError, json.JSONDecodeError): return {}
 def save(path, data, mode=None):
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700 if mode else 0o777)
+    # Windows turns 0o700 into an owner-only ACL; an elevated run makes Administrators the owner, locking out the sign-in widget.
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700 if mode and os.name != "nt" else 0o777)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, separators=(",", ":")))
     if mode: os.chmod(tmp, mode)

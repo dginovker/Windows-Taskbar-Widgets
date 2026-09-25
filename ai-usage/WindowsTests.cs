@@ -10,9 +10,14 @@ static class WindowsTests {
         try {
             Layout();
             SurfaceStyles();
+            CollectorFailures();
 
             Console.WriteLine("Passed "+checks+" Windows regression checks.");return 0;
         } catch(Exception error){Console.Error.WriteLine(error);return 1;}
+    }
+    static void CollectorFailures(){
+        Check(UsageApp.LastLine("token scan {}\r\nTraceback (most recent call last):\r\n  File \"widget_snapshot.py\", line 914\r\nPermissionError: [Errno 13] Permission denied: 'usage-history.json'\r\n\r\n")=="PermissionError: [Errno 13] Permission denied: 'usage-history.json'","Collector failures must name the Python exception");
+        Check(UsageApp.LastLine(" \r\n")=="no error output","A collector failure without output must say so");
     }
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern int GetWindowLong(IntPtr window,int index);
     static void SurfaceStyles(){

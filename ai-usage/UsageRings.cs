@@ -36,7 +36,7 @@ sealed class UsageApp : ApplicationContext {
     readonly bool[] showModels=new bool[2];
     readonly string python, helper;
     Dictionary<string, object> data = new Dictionary<string, object>();
-    bool busy, exiting;
+    bool busy, exiting, failed;
     string message = "Waiting for first update";
     [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr icon);
 
@@ -77,6 +77,12 @@ sealed class UsageApp : ApplicationContext {
     }
     static string Title(string name) { return char.ToUpper(name[0]) + name.Substring(1); }
     static Dictionary<string, object> Parse(string json) { return new JavaScriptSerializer { MaxJsonLength = 16000000 }.Deserialize<Dictionary<string, object>>(json); }
+    // A Python traceback ends with the exception line, which is what explains the failure.
+    internal static string LastLine(string text) {
+        var lines = text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        for (int i = lines.Length - 1; i >= 0; i--) if (lines[i].Trim().Length > 0) return lines[i].Trim();
+        return "no error output";
+    }
     static Dictionary<string, object> Obj(Dictionary<string, object> source, string key) {
         object value; return source.TryGetValue(key, out value) && value is Dictionary<string, object> ? (Dictionary<string, object>)value : new Dictionary<string, object>();
     }
@@ -115,7 +121,7 @@ sealed class UsageApp : ApplicationContext {
             finally { DestroyIcon(handle); }
         }
         string text = Title(names[index]) + " | 5h " + Percent(Obj(provider,"current")) + " | week " + Percent(Obj(provider,"weekly"));
-        if (provider.ContainsKey("error") || provider.ContainsKey("stale")) text += " | stale/error";
+        if (failed || provider.ContainsKey("error") || provider.ContainsKey("stale")) text += " | stale/error";
         icons[index].Text = text.Substring(0, Math.Min(63, text.Length));
     }
     void ShowTaskbar() {taskbar.EnabledOnTaskbar=true;taskbar.RefreshSurface();}
@@ -141,9 +147,9 @@ sealed class UsageApp : ApplicationContext {
             TaskbarSurface.TextAt(g,Title(names[i]),x+44,7,11,TaskbarSurface.Secondary(light));
             TaskbarSurface.TextAt(g,Percent(weekly),x+44,23,14,TaskbarSurface.Foreground(light),true);
             TaskbarSurface.TextAt(g,"week",x+81,27,9,TaskbarSurface.Secondary(light));
-            if(p.ContainsKey("error")||p.ContainsKey("stale"))using(var brush=new SolidBrush(Color.DarkOrange))g.FillEllipse(brush,x+32,6,5,5);
+            if(failed||p.ContainsKey("error")||p.ContainsKey("stale"))using(var brush=new SolidBrush(Color.DarkOrange))g.FillEllipse(brush,x+32,6,5,5);
         }
-        taskbar.Hint="Claude: 5h "+Percent(Obj(Obj(data,"claude"),"current"))+" / week "+Percent(Obj(Obj(data,"claude"),"weekly"))+
+        taskbar.Hint=(failed?message+"\n":"")+"Claude: 5h "+Percent(Obj(Obj(data,"claude"),"current"))+" / week "+Percent(Obj(Obj(data,"claude"),"weekly"))+
             "\nCodex: 5h "+Percent(Obj(Obj(data,"codex"),"current"))+" / week "+Percent(Obj(Obj(data,"codex"),"weekly"))+"\nOuter: week / inner: 5h / centre: reset days. Click for details.";
     }
     static void DrawArc(Graphics g,RectangleF bounds,float stroke,double used,Color color,Color track) {
@@ -166,16 +172,16 @@ sealed class UsageApp : ApplicationContext {
                     var output = process.StandardOutput.ReadToEndAsync(); var error = process.StandardError.ReadToEndAsync();
                     if (!process.WaitForExit(90000)) { process.Kill(); throw new Exception("Usage lookup timed out; retry from the menu."); }
                     Task.WaitAll(output, error);
-                    if (process.ExitCode != 0) throw new Exception("Collector failed. Run the collector from PowerShell to diagnose.");
+                    if (process.ExitCode != 0) throw new Exception("Collector exited with code " + process.ExitCode + ": " + LastLine(error.Result));
                     return output.Result;
                 }
             });
             if (exiting) return;
-            data = Parse(result); message = "Updated " + DateTime.Now.ToString("HH:mm:ss");
+            data = Parse(result); failed = false; message = "Updated " + DateTime.Now.ToString("HH:mm:ss");
             // Save usage only, never credentials, for diagnostics and offline inspection.
             string cache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AIUsageRings");
             Directory.CreateDirectory(cache); File.WriteAllText(Path.Combine(cache, "snapshot.json"), result);
-        } catch (Exception error) { message = "Update failed: " + error.Message + " Previous readings may be stale."; }
+        } catch (Exception error) { failed = true; message = "Update failed: " + error.Message + " Previous readings may be stale."; }
         finally { if (!exiting) { busy = false; Render(); } }
     }
     void Render() {
@@ -244,6 +250,7 @@ sealed class UsageApp : ApplicationContext {
         if(Obj(data,"claude").TryGetValue("available",out available) && available is bool && !(bool)available)
             end+=popup.Wrapped(g,"Claude usage will appear after the next Claude Code response.",24,end,552,11,popup.Muted);
         end+=popup.Wrapped(g,Str(Obj(data,"tokens"),"note"),24,end,552,11,popup.Muted);
+        if(failed)end+=popup.Wrapped(g,message,24,end,552,11,Color.DarkGoldenrod);
         object errors;if(data.TryGetValue("errors",out errors) && errors is IEnumerable)foreach(object error in (IEnumerable)errors)
             end+=popup.Wrapped(g,Convert.ToString(error),24,end,552,11,Color.DarkGoldenrod);
         return end+12;

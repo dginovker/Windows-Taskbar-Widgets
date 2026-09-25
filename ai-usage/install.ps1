@@ -46,5 +46,15 @@ foreach ($folder in $folders) {
     $shortcut.WorkingDirectory = $installDirectory
     $shortcut.Save()
 }
-if (-not $NoStart) { Start-Process -FilePath $target -WindowStyle Hidden }
+if (-not $NoStart) {
+    # Start as the signed-in user, like the Startup shortcut does: an elevated copy hides failures until the next sign-in.
+    $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if ($elevated) { Start-Process -FilePath (Join-Path $env:WINDIR 'explorer.exe') -ArgumentList "`"$target`"" }
+    else { Start-Process -FilePath $target -WindowStyle Hidden }
+    $deadline = (Get-Date).AddSeconds(15)
+    while (-not (Get-Process -Name 'AIUsageRings' -ErrorAction SilentlyContinue | Where-Object Path -eq $target)) {
+        if ((Get-Date) -gt $deadline) { throw 'AI Usage did not start. Open it from the Start menu.' }
+        Start-Sleep -Milliseconds 250
+    }
+}
 Write-Output "Installed $target"

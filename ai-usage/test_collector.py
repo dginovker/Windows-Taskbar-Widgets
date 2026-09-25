@@ -2,12 +2,14 @@
 import datetime as dt
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 source = Path(__file__).resolve().parent / 'widget_snapshot.py'
 spec = importlib.util.spec_from_file_location('widget_snapshot', source)
@@ -51,5 +53,25 @@ class CollectorTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 23)
             result = subprocess.run([sys.executable, '-c', code, str(source), str(path)])
             self.assertEqual(result.returncode, 0)
+
+    def test_load_treats_only_missing_or_corrupt_files_as_empty(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'state.json'
+            self.assertEqual(widget.load(path), {})
+            path.write_text('{', encoding='utf-8')
+            self.assertEqual(widget.load(path), {})
+            # An unreadable cache that looks empty sends the collector into a rebuild that crashes far from the cause.
+            with mock.patch.object(Path, 'read_text', side_effect=PermissionError(13, 'Permission denied', str(path))):
+                with self.assertRaises(PermissionError): widget.load(path)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows ACLs')
+    def test_save_directories_inherit_windows_permissions(self):
+        # Python maps mode 0o700 to an owner-only ACL; an elevated run makes Administrators the owner and locks out the sign-in widget.
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / 'cache'
+            widget.save(target / 'state.json', {}, 0o600)
+            script = "(Get-Acl -LiteralPath '%s').AreAccessRulesProtected" % str(target).replace("'", "''")
+            result = subprocess.run(['powershell', '-NoProfile', '-Command', script], capture_output=True, text=True, check=True)
+            self.assertEqual(result.stdout.strip(), 'False')
 
 if __name__ == '__main__': unittest.main()
