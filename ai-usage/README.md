@@ -8,4 +8,6 @@ This is an overlay for horizontal taskbars: leave space clear of Start, pinned a
 
 Run `./uninstall.ps1` to remove the app and shortcuts; history/preferences remain in LocalAppData. No Explorer patches or admin privileges are required.
 
+Starts, exits, refreshes and errors are logged to `%LOCALAPPDATA%\AIUsageRings\widget.log`. A run whose last line is neither `Process exiting` nor a session end was killed by another program.
+
 Validation: `./test.ps1`, `python ./test_collector.py`. Geometry tests cover multiple DPI scales, negative monitor coordinates, narrow screens, and auto-hide; interactive flyout behavior also needs desktop testing.

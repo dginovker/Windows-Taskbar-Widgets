@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -15,13 +16,81 @@ static class Program {
     [STAThread] static void Main(string[] args) {
         bool created;
         using (var mutex = new Mutex(true, "Local\\AIUsageRings.Windows", out created)) {
-            if (!created) return;
+            if (!created) { WidgetLog.Write("Exiting: another AI Usage instance is already running"); return; }
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            try {using (var app = new UsageApp()) Application.Run(app);}
-            catch(Exception error){MessageBox.Show(error.Message,"AI Usage could not start");}
+            LogExits();
+            try {
+                WidgetLog.Write("Started " + WidgetLog.Launch());
+                using (var app = new UsageApp()) {
+                    Application.Run(app);
+                    if (!app.Exiting) WidgetLog.Write("Message loop ended without an exit request, e.g. a WM_QUIT from another program");
+                }
+            }
+            catch(Exception error){
+                string logFailure = WidgetLog.TryWrite("Exiting on an exception: " + error);
+                MessageBox.Show(error.Message + (logFailure == null ? "" : "\n\n" + logFailure), "AI Usage could not start");
+            }
         }
+    }
+    // Every way the widget can end leaves a line in widget.log, so a run that ends without one was killed.
+    internal static void LogExits() {
+        AppDomain.CurrentDomain.UnhandledException += delegate(object sender, UnhandledExceptionEventArgs e) { WidgetLog.Write("Crashing on an unhandled exception: " + e.ExceptionObject); };
+        AppDomain.CurrentDomain.ProcessExit += delegate { WidgetLog.Write("Process exiting (exit code " + Environment.ExitCode + ")"); };
+        Microsoft.Win32.SystemEvents.SessionEnded += delegate(object sender, Microsoft.Win32.SessionEndedEventArgs e) { WidgetLog.Write("Exiting: Windows is ending the session (" + e.Reason + ")"); };
+        Application.ThreadException += OnUiException;
+    }
+    // WinForms' default error dialog, plus a record of the error and of the choice.
+    internal static void OnUiException(object sender, ThreadExceptionEventArgs e) {
+        string logFailure = WidgetLog.TryWrite("Unhandled UI error: " + e.Exception);
+        using (var dialog = new ThreadExceptionDialog(logFailure == null ? e.Exception : new IOException(logFailure, e.Exception))) {
+            if (dialog.ShowDialog() != DialogResult.Abort) return;
+            if (logFailure == null) WidgetLog.Write("Exiting: Quit was chosen on the error dialog");
+            Application.Exit(); Environment.Exit(0);
+        }
+    }
+}
+
+static class WidgetLog {
+    internal static string FilePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AIUsageRings", "widget.log");
+    internal const long MaxBytes = 1000000;
+    static readonly int processId = Process.GetCurrentProcess().Id;
+    static readonly object gate = new object();
+    // Raises on failure: a log that silently stops writing would hide the next disappearance too.
+    internal static void Write(string text) { Append(FilePath, text); }
+    // For error paths, which report a logging failure next to the original error instead of replacing it.
+    internal static string TryWrite(string text) {
+        try { Write(text); return null; } catch (Exception error) { return "Could not write " + FilePath + ": " + error.Message; }
+    }
+    internal static void Append(string path, string text) {
+        lock (gate) {
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+            var file = new FileInfo(path);
+            if (file.Exists && file.Length > MaxBytes) { File.Delete(path + ".old"); file.MoveTo(path + ".old"); }
+            using (var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete))
+            using (var writer = new StreamWriter(stream, new System.Text.UTF8Encoding(false)))
+                writer.WriteLine(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff zzz", CultureInfo.InvariantCulture) + " pid " + processId + ": " + text);
+        }
+    }
+    // Tools that kill a process tree find children by parent PID, which Windows reuses, so record who started the widget.
+    internal static string Launch() {
+        int parentId = ParentProcessId();
+        string parent = "parent pid " + parentId;
+        try { using (var process = Process.GetProcessById(parentId)) parent += " (" + process.ProcessName + ", started " + Stamp(process.StartTime) + ")"; }
+        catch (ArgumentException) { parent += " (already exited)"; }
+        catch (InvalidOperationException) { parent += " (already exited)"; }
+        catch (System.ComponentModel.Win32Exception error) { parent += " (" + error.Message + ")"; }
+        return Application.ExecutablePath + " built " + Stamp(File.GetLastWriteTime(Application.ExecutablePath)) + ", " + parent;
+    }
+    static string Stamp(DateTime time) { return time.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture); }
+    [StructLayout(LayoutKind.Sequential)] struct BasicInformation { public IntPtr ExitStatus, PebBaseAddress, AffinityMask, BasePriority, UniqueProcessId, InheritedFromUniqueProcessId; }
+    [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr process, int informationClass, ref BasicInformation information, int length, out int returned);
+    internal static int ParentProcessId() {
+        var information = new BasicInformation(); int returned;
+        int status = NtQueryInformationProcess(Process.GetCurrentProcess().Handle, 0, ref information, Marshal.SizeOf(information), out returned);
+        if (status != 0) throw new InvalidOperationException("NtQueryInformationProcess failed with NTSTATUS 0x" + status.ToString("X8"));
+        return information.InheritedFromUniqueProcessId.ToInt32();
     }
 }
 
@@ -50,7 +119,8 @@ sealed class UsageApp : ApplicationContext {
         popup.HeaderAction=async delegate {await RefreshUsage();};
         popup.HeaderHint=delegate {return popup.Footer+". Click to refresh.";};
         taskbar.PaintContent=PaintTaskbarUsage;
-        taskbar.Shutdown=delegate {ExitThread();};
+        taskbar.Shutdown=delegate {Exit("received the shutdown message that install.ps1 and uninstall.ps1 send");};
+        taskbar.FormClosed+=delegate {if(!exiting)WidgetLog.Write("Taskbar surface was closed from outside (a WM_CLOSE, e.g. taskkill without /F); usage stays in the tray");};
         taskbar.MouseClick+=delegate(object sender,MouseEventArgs e){if(e.Button==MouseButtons.Left)ShowPopup();};
         for (int i = 0; i < names.Length; i++) {
             var menu = new ContextMenuStrip();
@@ -60,7 +130,7 @@ sealed class UsageApp : ApplicationContext {
             menu.Opening += delegate { displayToggle.Checked = taskbar.Visible; };
             menu.Items.Add(displayToggle);
             menu.Items.Add("Refresh", null, async delegate { await RefreshUsage(); });
-            menu.Items.Add("Exit", null, delegate { ExitThread(); });
+            menu.Items.Add("Exit", null, delegate { Exit("Exit was chosen from the menu"); });
             if(i==0){taskbar.ContextMenuStrip=menu;taskbar.AddPlacementMenu(menu);}
             icons[i] = new NotifyIcon { Visible = false, Text = Title(names[i]) + " usage: loading", ContextMenuStrip = menu };
             icons[i].MouseClick += delegate(object sender, MouseEventArgs e) { if (e.Button == MouseButtons.Left) { if (popup.Visible) popup.Hide(); else ShowPopup(); } };
@@ -75,6 +145,8 @@ sealed class UsageApp : ApplicationContext {
         if (!File.Exists(displayPreference)) ShowTaskbar();
         popup.BeginInvoke(new Action(async delegate { await RefreshUsage(); }));
     }
+    internal bool Exiting { get { return exiting; } }
+    void Exit(string reason) { WidgetLog.Write("Exiting: " + reason); ExitThread(); }
     static string Title(string name) { return char.ToUpper(name[0]) + name.Substring(1); }
     static Dictionary<string, object> Parse(string json) { return new JavaScriptSerializer { MaxJsonLength = 16000000 }.Deserialize<Dictionary<string, object>>(json); }
     // A Python traceback ends with the exception line, which is what explains the failure.
@@ -181,7 +253,11 @@ sealed class UsageApp : ApplicationContext {
             // Save usage only, never credentials, for diagnostics and offline inspection.
             string cache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AIUsageRings");
             Directory.CreateDirectory(cache); File.WriteAllText(Path.Combine(cache, "snapshot.json"), result);
-        } catch (Exception error) { failed = true; message = "Update failed: " + error.Message + " Previous readings may be stale."; }
+            WidgetLog.Write("Refreshed usage");
+        } catch (Exception error) {
+            failed = true; message = "Update failed: " + error.Message + " Previous readings may be stale.";
+            string logFailure = WidgetLog.TryWrite(message); if (logFailure != null) message += " " + logFailure;
+        }
         finally { if (!exiting) { busy = false; Render(); } }
     }
     void Render() {

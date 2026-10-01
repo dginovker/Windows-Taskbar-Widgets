@@ -11,6 +11,7 @@ static class WindowsTests {
             Layout();
             SurfaceStyles();
             CollectorFailures();
+            ExitLog();
 
             Console.WriteLine("Passed "+checks+" Windows regression checks.");return 0;
         } catch(Exception error){Console.Error.WriteLine(error);return 1;}
@@ -18,6 +19,24 @@ static class WindowsTests {
     static void CollectorFailures(){
         Check(UsageApp.LastLine("token scan {}\r\nTraceback (most recent call last):\r\n  File \"widget_snapshot.py\", line 914\r\nPermissionError: [Errno 13] Permission denied: 'usage-history.json'\r\n\r\n")=="PermissionError: [Errno 13] Permission denied: 'usage-history.json'","Collector failures must name the Python exception");
         Check(UsageApp.LastLine(" \r\n")=="no error output","A collector failure without output must say so");
+    }
+    static void ExitLog(){
+        string folder=Path.Combine(Path.GetTempPath(),"ai-usage-log-"+Guid.NewGuid().ToString("N")),log=Path.Combine(folder,"widget.log");
+        try{
+            WidgetLog.Append(log,"first");WidgetLog.Append(log,"second");
+            string pid=" pid "+System.Diagnostics.Process.GetCurrentProcess().Id+": ";
+            var lines=File.ReadAllLines(log);
+            Check(lines.Length==2 && lines[0].EndsWith(pid+"first") && lines[1].EndsWith(pid+"second"),"Widget log must append lines tagged with the process id");
+            File.WriteAllText(log,new string('x',(int)WidgetLog.MaxBytes+1));
+            WidgetLog.Append(log,"third");
+            Check(new FileInfo(log+".old").Length>WidgetLog.MaxBytes && File.ReadAllLines(log).Length==1,"A full widget log must move to widget.log.old");
+            File.WriteAllText(Path.Combine(folder,"file"),"");
+            bool raised=false;
+            try{WidgetLog.Append(Path.Combine(folder,"file","widget.log"),"lost");}catch(IOException){raised=true;}
+            Check(raised,"An unwritable widget log must raise instead of dropping lines");
+        }finally{Directory.Delete(folder,true);}
+        using(var parent=System.Diagnostics.Process.GetProcessById(WidgetLog.ParentProcessId()))
+            Check(parent.StartTime<=System.Diagnostics.Process.GetCurrentProcess().StartTime,"Parent pid must name the process that started this one");
     }
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern int GetWindowLong(IntPtr window,int index);
     static void SurfaceStyles(){
